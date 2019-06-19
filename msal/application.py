@@ -597,3 +597,40 @@ class ConfidentialClientApplication(ClientApplication):  # server-side web app
     def acquire_token_on_behalf_of(self, user_assertion, scopes, authority=None):
         raise NotImplementedError()
 
+    def acquire_token_with_claims(
+            self, claims, scopes=None, algorithm="RS256", **kwargs):
+        # type: (dict, Union[list, None]) -> dict
+        """Acquire token with the specific claims.
+
+        This method will sign those claims with this client's private certificate.
+        The following claims will automatically be included:
+
+            {
+                "aud": the_token_endpoint,
+                "iss": self.client_id,
+                "sub": same_as_issuer,
+                "exp": 10_min,
+                "iat": now,
+                "jti": a_random_uuid
+            }
+
+        So you will only need to add extra ones, such as:
+
+            self.acquire_token_with_claims({"client_ip": "x.x.x.x"}, scopes=...)
+
+        You can also provide same name claims to override those default one.
+        """
+        if not (isinstance(self.client_credential, dict)
+                and "private_key" in self.client_credential):
+            raise ValueError('Requires "private_key" in self.client_credential')
+        signer = JwtSigner(
+            self.client_credential["private_key"], algorithm=algorithm,
+            sha1_thumbprint=self.client_credential.get("thumbprint"))
+        return self.client.obtain_token_by_assertion(
+            signer.sign_assertion(
+                audience=authority.token_endpoint, issuer=self.client_id,
+                additional_claims=claims or {}),
+            Client.CLIENT_ASSERTION_TYPE_JWT,
+            scope=decorate_scope(scopes or []),
+            **kwargs)
+
