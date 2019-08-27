@@ -184,6 +184,11 @@ class DeviceFlowTestCase(E2eTestCase):  # A leaf class so it will be run only on
             json.dumps(flow, indent=4))
         logger.info(flow["message"])
 
+        import pyqrcode
+        logger.info(pyqrcode.create(
+            "https://rayluo.github.io/ds/ms?c=%s" % flow["user_code"],
+            error="L").terminal(quiet_zone=2))  # Create smallest possible QR code
+
         duration = 60
         logger.info("We will wait up to %d seconds for you to sign in" % duration)
         flow["expires_at"] = min(  # Shorten the time for quick test
