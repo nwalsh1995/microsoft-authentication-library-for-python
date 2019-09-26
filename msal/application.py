@@ -395,7 +395,7 @@ class ClientApplication(object):
             - A dict containing "access_token" key, when cache lookup succeeds.
             - None when cache lookup does not yield anything.
         """
-        assert isinstance(scopes, list), "Invalid parameter type"
+        assert isinstance(scopes, list), "Invalid parameter type"        
         if authority:
             warnings.warn("We haven't decided how/if this method will accept authority parameter")
         # the_authority = Authority(
@@ -422,17 +422,25 @@ class ClientApplication(object):
             account,  # type: Optional[Account]
             authority,  # This can be different than self.authority
             force_refresh=False,  # type: Optional[boolean]
-            **kwargs):
+            **kwargs):                
         if not force_refresh:
-            matches = self.token_cache.find(
-                self.token_cache.CredentialType.ACCESS_TOKEN,
-                target=scopes,
-                query={
+            query={
                     "client_id": self.client_id,
                     "environment": authority.instance,
                     "realm": authority.tenant,
-                    "home_account_id": (account or {}).get("home_account_id"),
-                    })
+                    "home_account_id": (account or {}).get("home_account_id"),    
+                     # Some token types (SSH-certs, POP) are bound to a key
+                    "key_id":  kwargs.get("data", {}).get("key_id", None)                     
+                    }
+                       
+            #if (kwargs.get("data") and kwargs.get("data").get("key_id")):
+            #    query["key_id"] = kwargs.get("data").get("key_id")
+
+            matches = self.token_cache.find(
+                self.token_cache.CredentialType.ACCESS_TOKEN,
+                target=scopes,
+                query = query)
+               
             now = time.time()
             for entry in matches:
                 expires_in = int(entry["expires_on"]) - now
