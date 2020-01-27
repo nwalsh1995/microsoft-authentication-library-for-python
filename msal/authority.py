@@ -1,3 +1,4 @@
+import abc
 try:
     from urllib.parse import urlparse
 except ImportError:  # Fall back to Python 2
@@ -6,7 +7,8 @@ import logging
 
 import requests
 
-from .exceptions import MsalServiceError
+from msal.exceptions import MsalServiceError
+from msal.lib import get_instance_discovery_request_info, RequestInfo, verify_instance_discovery_response, get_tenant_discovery_request_info, verify_tenant_discovery_response
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,33 @@ WELL_KNOWN_B2C_HOSTS = [
     "b2clogin.de",
     ]
 
+
+class HTTPTransport(object):
+    @abc.abstractmethod
+    def send_request(self, request: RequestInfo):
+        ...
+
+
+class RequestsTransport(HTTPTransport):
+    def send_request(self, request: RequestInfo):
+        params = request.params
+        url = request.url
+        method = request.method
+        transport_method = None
+
+        if method == "get":
+            transport_method = requests.get
+        elif method == "post":
+            transport_method = requests.post
+
+        response = transport_method(url=url, params=params)
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise MsalServiceError(status_code=response.status_code) from e
+        return response.json()
+
+
 class Authority(object):
     """This class represents an (already-validated) authority.
 
@@ -34,7 +63,7 @@ class Authority(object):
     _domains_without_user_realm_discovery = set([])
 
     def __init__(self, authority_url, validate_authority=True,
-            verify=True, proxies=None, timeout=None,
+            verify=True, proxies=None, timeout=None,transport=None,
             ):
         """Creates an authority instance, and also validates it.
 
@@ -47,24 +76,29 @@ class Authority(object):
         self.verify = verify
         self.proxies = proxies
         self.timeout = timeout
+        # TODO: Proxies support
+        self.transport = transport if transport is not None else RequestsTransport()
         authority, self.instance, tenant = canonicalize(authority_url)
         parts = authority.path.split('/')
         is_b2c = any(self.instance.endswith("." + d) for d in WELL_KNOWN_B2C_HOSTS) or (
             len(parts) == 3 and parts[2].lower().startswith("b2c_"))
         if (tenant != "adfs" and (not is_b2c) and validate_authority
                 and self.instance not in WELL_KNOWN_AUTHORITY_HOSTS):
-            payload = instance_discovery(
-                "https://{}{}/oauth2/v2.0/authorize".format(
-                    self.instance, authority.path),
-                verify=verify, proxies=proxies, timeout=timeout)
-            if payload.get("error") == "invalid_instance":
-                raise ValueError(
-                    "invalid_instance: "
-                    "The authority you provided, %s, is not whitelisted. "
-                    "If it is indeed your legit customized domain name, "
-                    "you can turn off this check by passing in "
-                    "validate_authority=False"
-                    % authority_url)
+            instance_discovery_request_info = get_instance_discovery_request_info(self.instance, authority.path)
+            payload = self.transport.send_request(instance_discovery_request_info)
+            verify_instance_discovery_response(payload)
+            # payload = instance_discovery(
+            #     "https://{}{}/oauth2/v2.0/authorize".format(
+            #         self.instance, authority.path),
+            #     verify=verify, proxies=proxies, timeout=timeout)
+            # if payload.get("error") == "invalid_instance":
+            #     raise ValueError(
+            #         "invalid_instance: "
+            #         "The authority you provided, %s, is not whitelisted. "
+            #         "If it is indeed your legit customized domain name, "
+            #         "you can turn off this check by passing in "
+            #         "validate_authority=False"
+            #         % authority_url)
             tenant_discovery_endpoint = payload['tenant_discovery_endpoint']
         else:
             tenant_discovery_endpoint = (
@@ -73,9 +107,11 @@ class Authority(object):
                     authority.path,  # In B2C scenario, it is "/tenant/policy"
                     "" if tenant == "adfs" else "/v2.0" # the AAD v2 endpoint
                     ))
-        openid_config = tenant_discovery(
-            tenant_discovery_endpoint,
-            verify=verify, proxies=proxies, timeout=timeout)
+        openid_config = self.transport.send_request(get_tenant_discovery_request_info(tenant_discovery_endpoint))
+        verify_tenant_discovery_response(openid_config)
+        # openid_config = tenant_discovery(
+        #     tenant_discovery_endpoint,
+        #     verify=verify, proxies=proxies, timeout=timeout)
         logger.debug("openid_config = %s", openid_config)
         self.authorization_endpoint = openid_config['authorization_endpoint']
         self.token_endpoint = openid_config['token_endpoint']
@@ -111,21 +147,24 @@ def canonicalize(authority_url):
             % authority_url)
     return authority, authority.netloc, parts[1]
 
-def instance_discovery(url, **kwargs):
-    return requests.get(  # Note: This URL seemingly returns V1 endpoint only
-        'https://{}/common/discovery/instance'.format(
-            WORLD_WIDE  # Historically using WORLD_WIDE. Could use self.instance too
-                # See https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/blob/4.0.0/src/Microsoft.Identity.Client/Instance/AadInstanceDiscovery.cs#L101-L103
-                # and https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/blob/4.0.0/src/Microsoft.Identity.Client/Instance/AadAuthority.cs#L19-L33
-            ),
-        params={'authorization_endpoint': url, 'api-version': '1.0'},
-        **kwargs).json()
+# def instance_discovery(url, **kwargs):
+#     return requests.get(  # Note: This URL seemingly returns V1 endpoint only
+#         'https://{}/common/discovery/instance'.format(
+#             WORLD_WIDE  # Historically using WORLD_WIDE. Could use self.instance too
+#                 # See https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/blob/4.0.0/src/Microsoft.Identity.Client/Instance/AadInstanceDiscovery.cs#L101-L103
+#                 # and https://github.com/AzureAD/microsoft-authentication-library-for-dotnet/blob/4.0.0/src/Microsoft.Identity.Client/Instance/AadAuthority.cs#L19-L33
+#             ),
+#         params={'authorization_endpoint': url, 'api-version': '1.0'},
+#         **kwargs).json()
 
-def tenant_discovery(tenant_discovery_endpoint, **kwargs):
-    # Returns Openid Configuration
-    resp = requests.get(tenant_discovery_endpoint, **kwargs)
-    payload = resp.json()
-    if 'authorization_endpoint' in payload and 'token_endpoint' in payload:
-        return payload
-    raise MsalServiceError(status_code=resp.status_code, **payload)
+# def tenant_discovery(tenant_discovery_endpoint, **kwargs):
+#     # Returns Openid Configuration
+#     resp = requests.get(tenant_discovery_endpoint, **kwargs)
+#     payload = resp.json()
+#     if 'authorization_endpoint' in payload and 'token_endpoint' in payload:
+#         return payload
+#     raise MsalServiceError(status_code=resp.status_code, **payload)
 
+
+authority = Authority("https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47")
+print(authority.authorization_endpoint, authority.token_endpoint)
