@@ -2,10 +2,16 @@ from msal.exceptions import MsalServiceError
 
 
 class RequestInfo(object):
-    def __init__(self, url, method, params):
+    def __init__(self, url, method, params=None, headers=None):
         self.url = url
         self.method = method
         self.params = params
+        self.headers = headers
+
+
+class ResponseInfo(object):
+    def __init__(self, status_code):
+        self.status_code = status_code
 
 
 def get_instance_discovery_request_info(instance, authority_path):
@@ -14,6 +20,12 @@ def get_instance_discovery_request_info(instance, authority_path):
                                                                                                      authority_path),
                                "api-version": "1.0"},
                        method="get")
+
+
+def get_user_realm_discovery_request_info(instance, username, correlation_id=None):
+    return RequestInfo(url="https://{netloc}/common/userrealm/{username}?api-version=1.0".format(netloc=instance, username=username),
+                       method="get",
+                       headers={'Accept': 'application/json', 'client-request-id': correlation_id})
 
 
 def verify_instance_discovery_response(discovery_response_json):
@@ -33,3 +45,4 @@ def get_tenant_discovery_request_info(tenant_discovery_endpoint):
 def verify_tenant_discovery_response(tenant_discovery_json):
     if 'authorization_endpoint' not in tenant_discovery_json or 'token_endpoint' not in tenant_discovery_json:
         raise MsalServiceError(status_code=400, **tenant_discovery_json)
+
