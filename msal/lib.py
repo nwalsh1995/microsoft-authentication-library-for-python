@@ -2,11 +2,13 @@ from msal.exceptions import MsalServiceError
 
 
 class RequestInfo(object):
-    def __init__(self, url, method, params=None, headers=None):
+    def __init__(self, url, method, params=None, headers=None, auth=None, data=None):
         self.url = url
         self.method = method
         self.params = params
         self.headers = headers
+        self.auth = auth
+        self.data = data
 
 
 class ResponseInfo(object):

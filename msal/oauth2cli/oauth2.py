@@ -14,23 +14,13 @@ import sys
 
 import requests
 
+from msal.lib import RequestInfo
+
 
 string_types = (str,) if sys.version_info[0] >= 3 else (basestring, )
 
 
-class BaseClient(object):
-    # This low-level interface works. Yet you'll find its sub-class
-    # more friendly to remind you what parameters are needed in each scenario.
-    # More on Client Types at https://tools.ietf.org/html/rfc6749#section-2.1
-
-    @staticmethod
-    def encode_saml_assertion(assertion):
-        return base64.urlsafe_b64encode(assertion).rstrip(b'=')  # Per RFC 7522
-
-    CLIENT_ASSERTION_TYPE_JWT = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-    CLIENT_ASSERTION_TYPE_SAML2 = "urn:ietf:params:oauth:client-assertion-type:saml2-bearer"
-    client_assertion_encoders = {CLIENT_ASSERTION_TYPE_SAML2: encode_saml_assertion}
-
+class SharedClient(object):
     def __init__(
             self,
             server_configuration,  # type: dict
@@ -43,7 +33,8 @@ class BaseClient(object):
             verify=True,  # type: Union[str, True, False, None]
             proxies=None,  # type: Optional[dict]
             timeout=None,  # type: Union[tuple, float, None]
-            ):
+            session=None,
+    ):
         """Initialize a client object to talk all the OAuth2 grants to the server.
 
         Args:
@@ -85,7 +76,7 @@ class BaseClient(object):
         if client_assertion_type is not None:
             self.default_body["client_assertion_type"] = client_assertion_type
         self.logger = logging.getLogger(__name__)
-        self.session = s = requests.Session()
+        self.session = s = session or requests.Session()
         s.headers.update(default_headers or {})
         s.verify = verify
         s.proxies = proxies or {}
@@ -105,23 +96,65 @@ class BaseClient(object):
             params['scope'] = self._stringify(params['scope'])
         return params  # A dict suitable to be used in http request
 
-    def _obtain_token(  # The verb "obtain" is influenced by OAUTH2 RFC 6749
-            self, grant_type,
-            params=None,  # a dict to be sent as query string to the endpoint
-            data=None,  # All relevant data, which will go into the http body
-            headers=None,  # a dict to be sent as request headers
-            timeout=None,
-            post=None,  # A callable to replace requests.post(), for testing.
-                        # Such as: lambda url, **kwargs:
-                        #   Mock(status_code=200, json=Mock(return_value={}))
-            **kwargs  # Relay all extra parameters to underlying requests
-            ):  # Returns the json object came from the OAUTH2 response
+    def _stringify(self, sequence):
+        if isinstance(sequence, (list, set, tuple)):
+            return ' '.join(sorted(sequence))  # normalizing it, ascendingly
+        return sequence  # as-is
+
+    def build_auth_request_uri(
+            self,
+            response_type, redirect_uri=None, scope=None, state=None, **kwargs):
+        """Generate an authorization uri to be visited by resource owner.
+
+        Later when the response reaches your redirect_uri,
+        you can use parse_auth_response() to check the returned state.
+
+        This method could be named build_authorization_request_uri() instead,
+        but then there would be a build_authentication_request_uri() in the OIDC
+        subclass doing almost the same thing. So we use a loose term "auth" here.
+
+        :param response_type:
+            Must be "code" when you are using Authorization Code Grant,
+            "token" when you are using Implicit Grant, or other
+            (possibly space-delimited) strings as registered extension value.
+            See https://tools.ietf.org/html/rfc6749#section-3.1.1
+        :param redirect_uri: Optional. Server will use the pre-registered one.
+        :param scope: It is a space-delimited, case-sensitive string.
+            Some ID provider can accept empty string to represent default scope.
+        :param state: Recommended. An opaque value used by the client to
+            maintain state between the request and callback.
+        :param kwargs: Other parameters, typically defined in OpenID Connect.
+        """
+        if "authorization_endpoint" not in self.configuration:
+            raise ValueError("authorization_endpoint not found in configuration")
+        authorization_endpoint = self.configuration["authorization_endpoint"]
+        params = self._build_auth_request_params(
+            response_type, redirect_uri=redirect_uri, scope=scope, state=state,
+            **kwargs)
+        sep = '&' if '?' in authorization_endpoint else '?'
+        return "%s%s%s" % (authorization_endpoint, sep, urlencode(params))
+
+    @staticmethod
+    def parse_auth_response(params, state=None):
+        """Parse the authorization response being redirected back.
+
+        :param params: A string or dict of the query string
+        :param state: REQUIRED if the state parameter was present in the client
+            authorization request. This function will compare it with response.
+        """
+        if not isinstance(params, dict):
+            params = parse_qs(params)
+        if params.get('state') != state:
+            raise ValueError('state mismatch')
+        return params
+
+    def get_obtain_token_request_info(self, grant_type, data=None, headers=None):
         _data = {'client_id': self.client_id, 'grant_type': grant_type}
 
         if self.default_body.get("client_assertion_type") and self.client_assertion:
             # See https://tools.ietf.org/html/rfc7521#section-4.2
             encoder = self.client_assertion_encoders.get(
-                    self.default_body["client_assertion_type"], lambda a: a)
+                self.default_body["client_assertion_type"], lambda a: a)
             _data["client_assertion"] = encoder(
                 self.client_assertion()  # Do lazy on-the-fly computation
                 if callable(self.client_assertion) else self.client_assertion)
@@ -148,11 +181,60 @@ class BaseClient(object):
             raise ValueError("token_endpoint not found in configuration")
         _headers = {'Accept': 'application/json'}
         _headers.update(headers or {})
+
+        return RequestInfo(method="post", url=self.configuration["token_endpoint"],
+                           headers=_headers, auth=auth, data=_data)
+
+    def get_initiate_device_flow_request_info(self, scope):
+        DAE = "device_authorization_endpoint"
+        if not self.configuration.get(DAE):
+            raise ValueError("You need to provide device authorization endpoint")
+
+        return RequestInfo(method="post", url=self.configuration[DAE],
+                           data={"client_id": self.client_id, "scope": self._stringify(scope or [])})
+        # flow = self.session.post(self.configuration[DAE],
+        #                          data={"client_id": self.client_id, "scope": self._stringify(scope or [])},
+        #                          timeout=timeout or self.timeout,
+        #                          **kwargs).json()
+
+
+# sync client
+class BaseClient(SharedClient):
+    # This low-level interface works. Yet you'll find its sub-class
+    # more friendly to remind you what parameters are needed in each scenario.
+    # More on Client Types at https://tools.ietf.org/html/rfc6749#section-2.1
+
+    @staticmethod
+    def encode_saml_assertion(assertion):
+        return base64.urlsafe_b64encode(assertion).rstrip(b'=')  # Per RFC 7522
+
+    CLIENT_ASSERTION_TYPE_JWT = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    CLIENT_ASSERTION_TYPE_SAML2 = "urn:ietf:params:oauth:client-assertion-type:saml2-bearer"
+    client_assertion_encoders = {CLIENT_ASSERTION_TYPE_SAML2: encode_saml_assertion}
+
+    def _obtain_token(  # The verb "obtain" is influenced by OAUTH2 RFC 6749
+            self, grant_type,
+            params=None,  # a dict to be sent as query string to the endpoint
+            data=None,  # All relevant data, which will go into the http body
+            headers=None,  # a dict to be sent as request headers
+            timeout=None,
+            post=None,  # A callable to replace requests.post(), for testing.
+                        # Such as: lambda url, **kwargs:
+                        #   Mock(status_code=200, json=Mock(return_value={}))
+            **kwargs  # Relay all extra parameters to underlying requests
+            ):  # Returns the json object came from the OAUTH2 response
+        request_info = self.get_obtain_token_request_info(grant_type=grant_type,
+                                                          data=data,
+                                                          headers=headers).__dict__
+        request_info.pop("method")  # Unused since we are posting directly
         resp = (post or self.session.post)(
-            self.configuration["token_endpoint"],
-            headers=_headers, params=params, data=_data, auth=auth,
+            # self.configuration["token_endpoint"],
+            # headers=_headers, params=params, data=_data, auth=auth,
+            # timeout=timeout or self.timeout,
+            **request_info,
+            **kwargs,
             timeout=timeout or self.timeout,
-            **kwargs)
+        )
         if resp.status_code >= 500:
             resp.raise_for_status()  # TODO: Will probably retry here
         try:
@@ -178,11 +260,6 @@ class BaseClient(object):
         data = kwargs.pop('data', {})
         data.update(refresh_token=refresh_token, scope=scope)
         return self._obtain_token("refresh_token", data=data, **kwargs)
-
-    def _stringify(self, sequence):
-        if isinstance(sequence, (list, set, tuple)):
-            return ' '.join(sorted(sequence))  # normalizing it, ascendingly
-        return sequence  # as-is
 
 
 class Client(BaseClient):  # We choose to implement all 4 grants in 1 class
@@ -215,11 +292,11 @@ class Client(BaseClient):  # We choose to implement all 4 grants in 1 class
         And possibly here
         https://tools.ietf.org/html/draft-ietf-oauth-device-flow-12#section-3.3.1
         """
-        DAE = "device_authorization_endpoint"
-        if not self.configuration.get(DAE):
-            raise ValueError("You need to provide device authorization endpoint")
-        flow = self.session.post(self.configuration[DAE],
-            data={"client_id": self.client_id, "scope": self._stringify(scope or [])},
+        request_info = self.get_initiate_device_flow_request_info(scope=scope).__dict__
+        request_info.pop("method")
+
+        flow = self.session.post(
+            **request_info,
             timeout=timeout or self.timeout,
             **kwargs).json()
         flow["interval"] = int(flow.get("interval", 5))  # Some IdP returns string
@@ -284,53 +361,6 @@ class Client(BaseClient):  # We choose to implement all 4 grants in 1 class
                 if exit_condition(flow):
                     return result
                 time.sleep(1)  # Shorten each round, to make exit more responsive
-
-    def build_auth_request_uri(
-            self,
-            response_type, redirect_uri=None, scope=None, state=None, **kwargs):
-        """Generate an authorization uri to be visited by resource owner.
-
-        Later when the response reaches your redirect_uri,
-        you can use parse_auth_response() to check the returned state.
-
-        This method could be named build_authorization_request_uri() instead,
-        but then there would be a build_authentication_request_uri() in the OIDC
-        subclass doing almost the same thing. So we use a loose term "auth" here.
-
-        :param response_type:
-            Must be "code" when you are using Authorization Code Grant,
-            "token" when you are using Implicit Grant, or other
-            (possibly space-delimited) strings as registered extension value.
-            See https://tools.ietf.org/html/rfc6749#section-3.1.1
-        :param redirect_uri: Optional. Server will use the pre-registered one.
-        :param scope: It is a space-delimited, case-sensitive string.
-            Some ID provider can accept empty string to represent default scope.
-        :param state: Recommended. An opaque value used by the client to
-            maintain state between the request and callback.
-        :param kwargs: Other parameters, typically defined in OpenID Connect.
-        """
-        if "authorization_endpoint" not in self.configuration:
-            raise ValueError("authorization_endpoint not found in configuration")
-        authorization_endpoint = self.configuration["authorization_endpoint"]
-        params = self._build_auth_request_params(
-            response_type, redirect_uri=redirect_uri, scope=scope, state=state,
-            **kwargs)
-        sep = '&' if '?' in authorization_endpoint else '?'
-        return "%s%s%s" % (authorization_endpoint, sep, urlencode(params))
-
-    @staticmethod
-    def parse_auth_response(params, state=None):
-        """Parse the authorization response being redirected back.
-
-        :param params: A string or dict of the query string
-        :param state: REQUIRED if the state parameter was present in the client
-            authorization request. This function will compare it with response.
-        """
-        if not isinstance(params, dict):
-            params = parse_qs(params)
-        if params.get('state') != state:
-            raise ValueError('state mismatch')
-        return params
 
     def obtain_token_by_authorization_code(
             self, code, redirect_uri=None, scope=None, **kwargs):
