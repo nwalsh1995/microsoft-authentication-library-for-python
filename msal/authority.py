@@ -50,31 +50,13 @@ class Authority(object):
         authority, self.instance, tenant = canonicalize(authority_url)
 
         if openid_config is None:
-            parts = authority.path.split('/')
-            is_b2c = any(self.instance.endswith("." + d) for d in WELL_KNOWN_B2C_HOSTS) or (
-                len(parts) == 3 and parts[2].lower().startswith("b2c_"))
-            if (tenant != "adfs" and (not is_b2c) and validate_authority
-                    and self.instance not in WELL_KNOWN_AUTHORITY_HOSTS):
-                payload = instance_discovery(
-                    "https://{}{}/oauth2/v2.0/authorize".format(
-                        self.instance, authority.path),
-                    verify=verify, proxies=proxies, timeout=timeout)
-                if payload.get("error") == "invalid_instance":
-                    raise ValueError(
-                        "invalid_instance: "
-                        "The authority you provided, %s, is not whitelisted. "
-                        "If it is indeed your legit customized domain name, "
-                        "you can turn off this check by passing in "
-                        "validate_authority=False"
-                        % authority_url)
-                tenant_discovery_endpoint = payload['tenant_discovery_endpoint']
+            if requires_discovery(authority, self.instance, tenant, validate_authority):
+                tenant_discovery_endpoint = retrieve_tenant_discovery_endpoint(url="https://{}{}/oauth2/v2.0/authorize".format(self.instance, authority.path),
+                                                                               authority_url=authority_url,
+                                                                               verify=verify, proxies=proxies, timeout=timeout)
             else:
-                tenant_discovery_endpoint = (
-                    'https://{}{}{}/.well-known/openid-configuration'.format(
-                        self.instance,
-                        authority.path,  # In B2C scenario, it is "/tenant/policy"
-                        "" if tenant == "adfs" else "/v2.0" # the AAD v2 endpoint
-                        ))
+                tenant_discovery_endpoint = build_default_tenant_discovery_endpoint(self.instance, authority.path, tenant)
+
             openid_config = tenant_discovery(
                 tenant_discovery_endpoint,
                 verify=verify, proxies=proxies, timeout=timeout)
@@ -100,6 +82,39 @@ class Authority(object):
                 return resp.json()
             self.__class__._domains_without_user_realm_discovery.add(self.instance)
         return {}  # This can guide the caller to fall back normal ROPC flow
+
+
+def build_default_tenant_discovery_endpoint(instance, authority_path, tenant):
+    return 'https://{}{}{}/.well-known/openid-configuration'.format(
+        instance,
+        authority_path,  # In B2C scenario, it is "/tenant/policy"
+        "" if tenant == "adfs" else "/v2.0" # the AAD v2 endpoint
+    )
+
+
+def requires_discovery(authority, instance, tenant, validate_authority):
+    parts = authority.path.split('/')
+    is_b2c = any(instance.endswith("." + d) for d in WELL_KNOWN_B2C_HOSTS) or (
+            len(parts) == 3 and parts[2].lower().startswith("b2c_"))
+    return tenant != "adfs" and (not is_b2c) and validate_authority and instance not in WELL_KNOWN_AUTHORITY_HOSTS
+
+
+def retrieve_tenant_discovery_endpoint(url, authority_url, **kwargs):
+    payload = instance_discovery(url, **kwargs)
+    return get_discovery_endpoint_from_payload(payload, authority_url)
+
+
+def get_discovery_endpoint_from_payload(payload, authority_url):
+    if payload.get("error") == "invalid_instance":
+        raise ValueError(
+            "invalid_instance: "
+            "The authority you provided, %s, is not whitelisted. "
+            "If it is indeed your legit customized domain name, "
+            "you can turn off this check by passing in "
+            "validate_authority=False"
+            % authority_url)
+
+    return payload['tenant_discovery_endpoint']
 
 
 def canonicalize(authority_url):
