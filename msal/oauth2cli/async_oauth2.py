@@ -169,7 +169,7 @@ class AsyncBaseClient(object):
             timeout=timeout, **kwargs
         )
 
-    def obtain_token_by_refresh_token(self, refresh_token, scope=None, **kwargs):
+    async def obtain_token_by_refresh_token(self, refresh_token, scope=None, **kwargs):
         # type: (str, Union[str, list, set, tuple]) -> dict
         """Obtain an access token via a refresh token.
 
@@ -204,7 +204,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
     grant_assertion_encoders = {GRANT_TYPE_SAML2: AsyncBaseClient.encode_saml_assertion}
 
 
-    def initiate_device_flow(self, scope=None, timeout=None, **kwargs):
+    async def initiate_device_flow(self, scope=None, timeout=None, **kwargs):
         # type: (list, **dict) -> dict
         # The naming of this method is following the wording of this specs
         # https://tools.ietf.org/html/draft-ietf-oauth-device-flow-12#section-3.1
@@ -222,7 +222,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
         if not self.configuration.get(DAE):
             raise ValueError("You need to provide device authorization endpoint")
         flow = self.get_dae_json(
-            self.send_dae_request(
+            await self.send_dae_request(
                 data={"client_id": self.client_id, "scope": self._stringify(scope or [])},
                 timeout=timeout or self.timeout,
                 **kwargs
@@ -242,7 +242,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
     def get_dae_json(self, resp):
         return resp.json()
 
-    def _obtain_token_by_device_flow(self, flow, **kwargs):
+    async def _obtain_token_by_device_flow(self, flow, **kwargs):
         # type: (dict, **dict) -> dict
         # This method updates flow during each run. And it is non-blocking.
         now = time.time()
@@ -262,7 +262,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
         flow["latest_attempt_at"] = now
         return result
 
-    def obtain_token_by_device_flow(self,
+    async def obtain_token_by_device_flow(self,
                                     flow,
                                     exit_condition=lambda flow: flow.get("expires_at", 0) < time.time(),
                                     **kwargs):
@@ -292,7 +292,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
                 to make the loop run only once, i.e. no polling, hence non-block.
         """
         while True:
-            result = self._obtain_token_by_device_flow(flow, **kwargs)
+            result = await self._obtain_token_by_device_flow(flow, **kwargs)
             if result.get("error") not in self.DEVICE_FLOW_RETRIABLE_ERRORS:
                 return result
             for i in range(flow.get("interval", 5)):  # Wait interval seconds
@@ -347,7 +347,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
             raise ValueError('state mismatch')
         return params
 
-    def obtain_token_by_authorization_code(
+    async def obtain_token_by_authorization_code(
             self, code, redirect_uri=None, scope=None, **kwargs):
         """Get a token via auhtorization code. a.k.a. Authorization Code Grant.
 
@@ -372,16 +372,16 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
             # client_id is required, if the client is not authenticating itself.
             # See https://tools.ietf.org/html/rfc6749#section-4.1.3
             data["client_id"] = self.client_id
-        return self._obtain_token("authorization_code", data=data, **kwargs)
+        return await self._obtain_token("authorization_code", data=data, **kwargs)
 
-    def obtain_token_by_username_password(
+    async def obtain_token_by_username_password(
             self, username, password, scope=None, **kwargs):
         """The Resource Owner Password Credentials Grant, used by legacy app."""
         data = kwargs.pop("data", {})
         data.update(username=username, password=password, scope=scope)
-        return self._obtain_token("password", data=data, **kwargs)
+        return await self._obtain_token("password", data=data, **kwargs)
 
-    def obtain_token_for_client(self, scope=None, **kwargs):
+    async def obtain_token_for_client(self, scope=None, **kwargs):
         """Obtain token for this client (rather than for an end user),
         a.k.a. the Client Credentials Grant, used by Backend Applications.
 
@@ -393,7 +393,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
         """
         data = kwargs.pop("data", {})
         data.update(scope=scope)
-        return self._obtain_token("client_credentials", data=data, **kwargs)
+        return await self._obtain_token("client_credentials", data=data, **kwargs)
 
     def __init__(self,
                  server_configuration, client_id,
@@ -401,7 +401,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
                  on_removing_rt=lambda token_item: None,
                  on_updating_rt=lambda token_item, new_rt: None,
                  **kwargs):
-        super(Client, self).__init__(server_configuration, client_id, **kwargs)
+        super(AsyncClient, self).__init__(server_configuration, client_id, **kwargs)
         self.on_obtaining_tokens = on_obtaining_tokens
         self.on_removing_rt = on_removing_rt
         self.on_updating_rt = on_updating_rt
@@ -410,7 +410,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
         RT = "refresh_token"
         _data = data.copy()  # to prevent side effect
         refresh_token = _data.get(RT)
-        resp = await super(Client, self)._obtain_token(
+        resp = await super(AsyncClient, self)._obtain_token(
             grant_type, params, _data, *args, **kwargs)
         if "error" not in resp:
             _resp = resp.copy()
@@ -435,7 +435,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
             })
         return resp
 
-    def obtain_token_by_refresh_token(self, token_item, scope=None,
+    async def obtain_token_by_refresh_token(self, token_item, scope=None,
                                       rt_getter=lambda token_item: token_item["refresh_token"],
                                       on_removing_rt=None,
                                       **kwargs):
@@ -456,7 +456,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
         :param rt_getter: A callable to translate the token_item to a raw RT string
         :param on_removing_rt: If absent, fall back to the one defined in initialization
         """
-        resp = super(Client, self).obtain_token_by_refresh_token(
+        resp = await super(AsyncClient, self).obtain_token_by_refresh_token(
             rt_getter(token_item)
             if not isinstance(token_item, string_types) else token_item,
             scope=scope,
@@ -467,7 +467,7 @@ class AsyncClient(AsyncBaseClient):  # We choose to implement all 4 grants in 1 
             self.on_updating_rt(token_item, resp['refresh_token'])
         return resp
 
-    def obtain_token_by_assertion(
+    async def obtain_token_by_assertion(
             self, assertion, grant_type, scope=None, **kwargs):
         # type: (bytes, Union[str, None], Union[str, list, set, tuple]) -> dict
         """This method implements Assertion Framework for OAuth2 (RFC 7521).

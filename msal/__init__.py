@@ -32,5 +32,6 @@ from .application import (
     PublicClientApplication,
     )
 from .async_authority import AsyncAuthority
+from .async_application import AsyncConfidentialClientApplication
 from .token_cache import TokenCache, SerializableTokenCache
 
